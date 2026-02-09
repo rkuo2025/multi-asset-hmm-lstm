@@ -5,12 +5,12 @@ from AlgorithmImports import *
 class MultiAssetHMMLSTMAlgorithm(QCAlgorithm):
 
     def Initialize(self):
+        # 1. Backtest Settings
         self.SetStartDate(2023, 1, 1)
         self.SetEndDate(2025, 12, 31)
-        self.SetCash(1000000) # $1 Million Dollars
+        self.SetCash(1000000) # One Million Dollars
 
-        # 1. Allocation Logic
-        # 50% VTI, remaining 50% split equally among others (12.5% each)
+        # 2. Strategy Weights
         self.weights = {
             "VTI": 0.50,
             "XLP": 0.125,
@@ -19,43 +19,55 @@ class MultiAssetHMMLSTMAlgorithm(QCAlgorithm):
             "REMX": 0.125
         }
 
-        # 2. Setup Brokerage & Universe
+        # 3. Setup Framework for Alpha Streams
         self.SetBrokerageModel(BrokerageName.AlphaStreams)
+        
+        # Add symbols
         self.symbols = [self.AddEquity(ticker, Resolution.Daily).Symbol for ticker in self.weights.keys()]
         self.SetUniverseSelection(ManualUniverseSelectionModel(self.symbols))
 
-        # 3. Add Alpha Model
-        # Note: In a real QC environment, training a full LSTM inside Update() is too slow.
-        # This framework sets up the structure for Insight-based trading.
-        self.AddAlpha(HMMLSTMAlphaModel(self.weights))
+        # 4. Alpha Model with Trade Frequency Limit (5 times a month)
+        self.AddAlpha(LimitedTradeAlphaModel(self.weights, trades_per_month=5))
 
-        # 4. Portfolio Construction
+        # 5. Portfolio Construction
         self.SetPortfolioConstruction(InsightWeightingPortfolioConstructionModel())
         self.SetExecution(ImmediateExecutionModel())
 
-class HMMLSTMAlphaModel(AlphaModel):
-    def __init__(self, weights):
+class LimitedTradeAlphaModel(AlphaModel):
+    def __init__(self, weights, trades_per_month=5):
         self.weights = weights
-        self.lookback = 60 # Matches our research script
+        self.trades_per_month = trades_per_month
+        self.monthly_trade_count = 0
+        self.last_month = -1
 
     def Update(self, algorithm, data):
+        # Reset counter at the start of a new month
+        current_month = algorithm.Time.month
+        if current_month != self.last_month:
+            self.monthly_trade_count = 0
+            self.last_month = current_month
+
         insights = []
         
-        # We emit insights for each asset based on our weighted strategy.
-        # In a full QC implementation, you would use a pre-trained model 
-        # or a simpler statistical proxy here because LSTM training is 
-        # computationally expensive for backtests.
-        for ticker, weight in self.weights.items():
-            symbol = [s for s in algorithm.ActiveSecurities.Keys if s.Value == ticker][0]
+        # Only emit insights if we haven't reached our monthly limit
+        if self.monthly_trade_count < self.trades_per_month:
+            for ticker, weight in self.weights.items():
+                symbol = [s for s in algorithm.ActiveSecurities.Keys if s.Value == ticker][0]
+                
+                # We consider one "rebalance" of the portfolio as one trade event
+                # Since we are emitting insights for the whole portfolio, 
+                # we increment the count once per successful Update call.
+                insights.append(Insight.Price(
+                    symbol, 
+                    timedelta(days=1), 
+                    InsightDirection.Up, 
+                    None, None, None, 
+                    weight
+                ))
             
-            # For this multi-asset allocation, we maintain the Master's 
-            # requested 50% / 12.5% split.
-            insights.append(Insight.Price(
-                symbol, 
-                timedelta(days=1), 
-                InsightDirection.Up, 
-                None, None, None, 
-                weight
-            ))
+            # Increment the monthly trade/rebalance count
+            if len(insights) > 0:
+                self.monthly_trade_count += 1
+                algorithm.Debug(f"[{algorithm.Time}] Monthly Trade {self.monthly_trade_count}/{self.trades_per_month} emitted.")
 
         return insights
